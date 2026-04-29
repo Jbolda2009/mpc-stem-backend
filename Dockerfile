@@ -17,4 +17,4 @@ COPY app.py .
 
 EXPOSE 10000
 
-CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}
+CMD ["python", "app.py"]
