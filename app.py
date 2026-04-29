@@ -16,8 +16,6 @@ JOBS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title=APP_NAME)
 
-# For testing, allow all origins.
-# Later, lock this down to your Vercel app URL.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,67 +49,58 @@ async def separate_audio(file: UploadFile = File(...)):
     input_path = input_dir / safe_name
 
     try:
-      with open(input_path, "wb") as f:
-          shutil.copyfileobj(file.file, f)
+        with open(input_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
 
-      # Demucs separates into vocals, drums, bass, other by default.
-      # Demucs is a music source separation model capable of separating drums, bass, and vocals from the rest of the accompaniment. 0
-      command = [
-          "python",
-          "-m",
-          "demucs",
-          "--two-stems", "vocals",
-          # Remove the two lines above if you want 4 stems instead of vocals/no_vocals.
-          # For full 4-stem mode, use command below:
-      ]
+        command = [
+            "python",
+            "-m",
+            "demucs",
+            "-n",
+            "htdemucs",
+            "--out",
+            str(output_dir),
+            str(input_path)
+        ]
 
-      command = [
-          "python",
-          "-m",
-          "demucs",
-          "-n", "htdemucs",
-          "--out", str(output_dir),
-          str(input_path)
-      ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=900
+        )
 
-      result = subprocess.run(
-          command,
-          capture_output=True,
-          text=True,
-          timeout=900
-      )
+        if result.returncode != 0:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Demucs failed",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr
+                }
+            )
 
-      if result.returncode != 0:
-          return JSONResponse(
-              status_code=500,
-              content={
-                  "error": "Demucs failed",
-                  "stdout": result.stdout,
-                  "stderr": result.stderr
-              }
-          )
+        separated_root = output_dir / "htdemucs"
+        song_folders = list(separated_root.glob("*"))
 
-      separated_root = output_dir / "htdemucs"
-      song_folders = list(separated_root.glob("*"))
+        if not song_folders:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "No separated stems found."}
+            )
 
-      if not song_folders:
-          return JSONResponse(
-              status_code=500,
-              content={"error": "No separated stems found."}
-          )
+        stems_folder = song_folders[0]
+        expected_stems = ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
 
-      stems_folder = song_folders[0]
+        zip_path = job_dir / "stems.zip"
 
-      expected_stems = ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-      zip_path = job_dir / "stems.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for stem in expected_stems:
+                stem_path = stems_folder / stem
+                if stem_path.exists():
+                    zipf.write(stem_path, arcname=stem)
 
-      with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-          for stem in expected_stems:
-              stem_path = stems_folder / stem
-              if stem_path.exists():
-                  zipf.write(stem_path, arcname=stem)
-
-          readme = f"""MPC Stem Backend Export
+            readme = f"""MPC Stem Backend Export
 
 Original file:
 {original_name}
@@ -128,13 +117,13 @@ How to use:
 3. Load stems into MPC.
 4. Chop, loop, or assign to pads.
 """
-          zipf.writestr("README.txt", readme)
+            zipf.writestr("README.txt", readme)
 
-      return FileResponse(
-          path=zip_path,
-          filename="mpc-separated-stems.zip",
-          media_type="application/zip"
-      )
+        return FileResponse(
+            path=zip_path,
+            filename="mpc-separated-stems.zip",
+            media_type="application/zip"
+        )
 
     except subprocess.TimeoutExpired:
         return JSONResponse(
@@ -145,5 +134,15 @@ How to use:
     except Exception as e:
         return JSONResponse(
             status_code=500,
-            content={"error": "Server error", "details": str(e)}
+            content={
+                "error": "Server error",
+                "details": str(e)
+            }
         )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
